@@ -31,8 +31,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--gameplay",
         required=True,
-        type=Path,
-        help="Путь к видео с геймплеем.",
+        type=str,
+        help=(
+            "Категория из assets/gameplay "
+            "или путь к конкретному видео."
+        ),
     )
 
     parser.add_argument(
@@ -69,6 +72,12 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--no-subtitles",
+        action="store_true",
+        help="Создать видео без субтитров.",
+    )
+
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("output/final_short.mp4"),
@@ -79,13 +88,15 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def load_story(args: argparse.Namespace) -> str:
+    """Получает историю из аргумента или текстового файла."""
+
     if args.text is not None:
         return args.text
 
     if args.text_file is None:
         raise ValueError("Не указан текст истории.")
 
-    if not args.text_file.exists():
+    if not args.text_file.is_file():
         raise FileNotFoundError(
             f"Файл с историей не найден: {args.text_file.resolve()}"
         )
@@ -109,6 +120,7 @@ def main() -> int:
             voice_rate=args.voice_rate,
             music_volume=args.music_volume,
             fps=args.fps,
+            subtitles=not args.no_subtitles,
         )
 
     except (
