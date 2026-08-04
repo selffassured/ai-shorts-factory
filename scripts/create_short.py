@@ -5,8 +5,10 @@ import sys
 from pathlib import Path
 
 from app.factory import AIShortsFactory
+from app.services.gameplay.clipper import GameplayClipError
 from app.services.tts.edge_provider import DEFAULT_VOICE, TTSError
 from app.services.video.renderer import VideoRenderError
+from app.services.video.video_info import MediaInfoError
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -128,6 +130,8 @@ def main() -> int:
         ValueError,
         TTSError,
         VideoRenderError,
+        GameplayClipError,
+        MediaInfoError,
     ) as error:
         print(f"Ошибка: {error}", file=sys.stderr)
         return 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 import random
 from pathlib import Path
 
+
 SUPPORTED_EXTENSIONS = {
     ".mp4",
     ".mov",
@@ -15,32 +16,49 @@ SUPPORTED_EXTENSIONS = {
 class GameplayLibrary:
     """Библиотека игровых роликов."""
 
-    def __init__(self, root: Path = Path("assets/gameplay")):
+    def __init__(
+        self,
+        root: Path = Path("assets/gameplay"),
+    ) -> None:
         self.root = root.resolve()
 
     def get_random_video(self, category: str) -> Path:
-        folder = self.root / category
+        """Возвращает случайное видео из категории."""
 
-        if not folder.exists():
-            raise FileNotFoundError(
-                f"Категория '{category}' не существует."
+        clean_category = category.strip().lower()
+
+        if not clean_category:
+            raise ValueError(
+                "Название категории не может быть пустым."
             )
 
-        videos = [
-            file
+        folder = self.root / clean_category
+
+        if not folder.is_dir():
+            raise FileNotFoundError(
+                f"Категория '{clean_category}' не существует: {folder}"
+            )
+
+        videos = sorted(
+            file.resolve()
             for file in folder.iterdir()
-            if file.suffix.lower() in SUPPORTED_EXTENSIONS
-        ]
+            if (
+                file.is_file()
+                and file.suffix.lower() in SUPPORTED_EXTENSIONS
+            )
+        )
 
         if not videos:
             raise FileNotFoundError(
-                f"В категории '{category}' нет видео."
+                f"В категории '{clean_category}' нет поддерживаемых видео."
             )
 
         return random.choice(videos)
 
     def list_categories(self) -> list[str]:
-        if not self.root.exists():
+        """Возвращает список доступных категорий."""
+
+        if not self.root.is_dir():
             return []
 
         return sorted(
