@@ -3,10 +3,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from app.services.gameplay.clipper import (
-    GameplayClipError,
-    prepare_gameplay_segment,
-)
+from app.services.gameplay.clipper import prepare_gameplay_segment
 from app.services.gameplay.library import GameplayLibrary
 from app.services.subtitles.ass_generator import generate_ass_subtitles
 from app.services.tts.edge_provider import (
@@ -17,6 +14,7 @@ from app.services.video.renderer import (
     render_video_with_audio,
     render_video_with_audio_and_ass_subtitles,
     render_video_with_voice_and_music,
+    render_video_with_voice_music_and_ass_subtitles,
 )
 from app.services.video.video_info import get_media_duration
 
@@ -28,19 +26,16 @@ class AIShortsFactory:
         self,
         gameplay_library: GameplayLibrary | None = None,
     ) -> None:
-        self.gameplay_library = (
-            gameplay_library or GameplayLibrary()
-        )
+        self.gameplay_library = gameplay_library or GameplayLibrary()
 
     def _resolve_gameplay(
         self,
         gameplay: str | Path,
     ) -> Path:
         """
-        Находит конкретное видео.
+        Возвращает конкретный файл геймплея.
 
-        gameplay может быть путём к файлу
-        или названием категории.
+        Можно передать путь к видео или название категории.
         """
 
         candidate = Path(gameplay)
@@ -74,9 +69,7 @@ class AIShortsFactory:
         clean_story = story.strip()
 
         if not clean_story:
-            raise ValueError(
-                "История не может быть пустой."
-            )
+            raise ValueError("История не может быть пустой.")
 
         gameplay_path = self._resolve_gameplay(gameplay)
         output_video = output_video.resolve()
@@ -94,39 +87,45 @@ class AIShortsFactory:
             exist_ok=True,
         )
 
+        
         with tempfile.TemporaryDirectory(
             prefix="ai_shorts_"
         ) as temporary_directory:
             temporary_path = Path(temporary_directory)
 
-            # 1. Создаём озвучку и точные тайминги слов.
+            voice_path = temporary_path / "voice.mp3"
+            srt_path = temporary_path / "subtitles.srt"
+            ass_path = temporary_path / "subtitles.ass"
+            gameplay_segment_path = (
+                temporary_path / "gameplay_segment.mp4"
+            )
+
+           
             speech = synthesize_speech_with_subtitles(
                 text=clean_story,
-                output_audio=temporary_path / "voice.mp3",
-                output_subtitles=temporary_path / "subtitles.srt",
+                output_audio=voice_path,
+                output_subtitles=srt_path,
                 voice=voice,
                 rate=voice_rate,
             )
 
-            # 2. Узнаём длительность озвучки.
+            
             voice_duration = get_media_duration(
                 speech.audio_path
             )
 
-            # 3. Берём случайный фрагмент выбранного геймплея.
+            
             prepared_gameplay = prepare_gameplay_segment(
                 input_video=gameplay_path,
-                output_video=(
-                    temporary_path / "gameplay_segment.mp4"
-                ),
+                output_video=gameplay_segment_path,
                 required_duration=voice_duration,
             )
 
-            # 4. Создаём ASS-субтитры.
+            
             if subtitles:
-                ass_path = generate_ass_subtitles(
+                generated_ass = generate_ass_subtitles(
                     srt_path=speech.subtitles_path,
-                    output_ass=temporary_path / "subtitles.ass",
+                    output_ass=ass_path,
                     font_size=72,
                     margin_vertical=520,
                     min_words=2,
@@ -134,17 +133,30 @@ class AIShortsFactory:
                     max_duration=2.2,
                 )
 
-                if music is None:
-                    return render_video_with_audio_and_ass_subtitles(
-                        input_video=prepared_gameplay,
-                        input_audio=speech.audio_path,
-                        subtitles_ass=ass_path,
-                        output_video=output_video,
-                        fps=fps,
+                # Голос + музыка + субтитры.
+                if music is not None:
+                    return (
+                        render_video_with_voice_music_and_ass_subtitles(
+                            input_video=prepared_gameplay,
+                            voice_audio=speech.audio_path,
+                            background_music=music,
+                            subtitles_ass=generated_ass,
+                            output_video=output_video,
+                            fps=fps,
+                            music_volume=music_volume,
+                        )
                     )
 
-            # Пока существующий музыкальный рендер
-            # не встраивает ASS-субтитры.
+                # Голос + субтитры, без музыки.
+                return render_video_with_audio_and_ass_subtitles(
+                    input_video=prepared_gameplay,
+                    input_audio=speech.audio_path,
+                    subtitles_ass=generated_ass,
+                    output_video=output_video,
+                    fps=fps,
+                )
+
+            # 5. Режим без субтитров, но с музыкой.
             if music is not None:
                 return render_video_with_voice_and_music(
                     input_video=prepared_gameplay,
@@ -155,6 +167,7 @@ class AIShortsFactory:
                     music_volume=music_volume,
                 )
 
+            # 6. Только голос и геймплей.
             return render_video_with_audio(
                 input_video=prepared_gameplay,
                 input_audio=speech.audio_path,

@@ -442,3 +442,122 @@ def render_video_with_audio_and_ass_subtitles(
         )
 
     return output_video
+
+def render_video_with_voice_music_and_ass_subtitles(
+    input_video: Path,
+    voice_audio: Path,
+    background_music: Path,
+    subtitles_ass: Path,
+    output_video: Path,
+    width: int = 1080,
+    height: int = 1920,
+    fps: int = 30,
+    voice_volume: float = 1.0,
+    music_volume: float = 0.12,
+) -> Path:
+    """Создаёт вертикальное видео с голосом, музыкой и ASS-субтитрами."""
+
+    ensure_ffmpeg_available()
+
+    input_video = input_video.resolve()
+    voice_audio = voice_audio.resolve()
+    background_music = background_music.resolve()
+    subtitles_ass = subtitles_ass.resolve()
+    output_video = output_video.resolve()
+
+    for path, description in (
+        (input_video, "Исходное видео"),
+        (voice_audio, "Озвучка"),
+        (background_music, "Фоновая музыка"),
+        (subtitles_ass, "ASS-субтитры"),
+    ):
+        if not path.is_file():
+            raise FileNotFoundError(f"{description} не найдены: {path}")
+
+    if not 0.0 <= voice_volume <= 2.0:
+        raise ValueError("Громкость голоса должна быть в диапазоне 0–2.")
+
+    if not 0.0 <= music_volume <= 1.0:
+        raise ValueError("Громкость музыки должна быть в диапазоне 0–1.")
+
+    output_video.parent.mkdir(parents=True, exist_ok=True)
+
+    subtitle_path = subtitles_ass.as_posix().replace(":", r"\:")
+
+    video_filter = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},"
+        f"fps={fps},"
+        f"ass='{subtitle_path}'"
+    )
+
+    audio_filter = (
+        f"[1:a]volume={voice_volume}[voice];"
+        f"[2:a]volume={music_volume}[music];"
+        "[voice][music]"
+        "amix=inputs=2:duration=first:dropout_transition=2,"
+        "alimiter=limit=0.95"
+        "[mixed_audio]"
+    )
+
+    command = [
+        "ffmpeg",
+        "-y",
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(input_video),
+        "-i",
+        str(voice_audio),
+        "-stream_loop",
+        "-1",
+        "-i",
+        str(background_music),
+        "-vf",
+        video_filter,
+        "-filter_complex",
+        audio_filter,
+        "-map",
+        "0:v:0",
+        "-map",
+        "[mixed_audio]",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "20",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+        "-movflags",
+        "+faststart",
+        str(output_video),
+    ]
+
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    if result.returncode != 0:
+        raise VideoRenderError(
+            "FFmpeg не смог объединить голос, музыку и субтитры.\n"
+            f"Код ошибки: {result.returncode}\n"
+            f"Вывод FFmpeg:\n{result.stderr}"
+        )
+
+    if not output_video.is_file() or output_video.stat().st_size == 0:
+        raise VideoRenderError(
+            "FFmpeg завершился без ошибки, но видео не было создано."
+        )
+
+    return output_video
