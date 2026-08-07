@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "story_text": "",
+  "gameplay": "Выбрать",
+  "voice": "ru-RU-SvetlanaNeural",
+  "voice_rate": 0,
+  "music": null,
+  "music_volume": 12,
+  "subtitles": true,
+  "subtitle_style": "Glow",
+  "subtitle_font_size": 20,
+  "subtitle_position": "Центр",
+  "subtitle_opacity": 72
+}

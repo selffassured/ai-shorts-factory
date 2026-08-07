@@ -109,17 +109,17 @@ def prepare_gameplay_segment(
         "0:v:0",
         "-an",
 
+        # ВАЖНО: здесь больше не перекодируем видео.
+        # Финальный renderer всё равно перекодирует его один раз,
+        # поэтому повторный libx264 на промежуточном этапе только
+        # тратил CPU и время.
         "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "20",
-        "-pix_fmt",
-        "yuv420p",
+        "copy",
+        "-reset_timestamps",
+        "1",
+        "-avoid_negative_ts",
+        "make_zero",
 
-        "-movflags",
-        "+faststart",
         str(output_video),
     ]
 

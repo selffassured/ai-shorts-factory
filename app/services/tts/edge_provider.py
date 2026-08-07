@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import random
+import shutil
+import time
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -188,6 +192,29 @@ async def _synthesize_with_subtitles_async(
     )
 
 
+def _tts_cache_paths(
+    text: str,
+    voice: str,
+    rate: str,
+    volume: str,
+) -> tuple[Path, Path]:
+    """Возвращает пути к кэшированным MP3/SRT."""
+
+    cache_key = hashlib.sha1(
+        (
+            f"{voice}|{rate}|{volume}|{text}"
+        ).encode("utf-8")
+    ).hexdigest()
+
+    cache_dir = Path(".cache") / "tts"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    return (
+        cache_dir / f"{cache_key}.mp3",
+        cache_dir / f"{cache_key}.srt",
+    )
+
+
 def synthesize_speech_with_subtitles(
     text: str,
     output_audio: Path,
@@ -227,23 +254,66 @@ def synthesize_speech_with_subtitles(
         exist_ok=True,
     )
 
-    try:
-        asyncio.run(
-            _synthesize_with_subtitles_async(
-                text=clean_text,
-                output_audio=output_audio,
-                output_subtitles=output_subtitles,
-                voice=voice,
-                rate=rate,
-                volume=volume,
-            )
+    cache_audio, cache_subtitles = _tts_cache_paths(
+        clean_text,
+        voice,
+        rate,
+        volume,
+    )
+
+    # Повторный рендер того же текста/голоса не обращается к Edge TTS.
+    if (
+        cache_audio.is_file()
+        and cache_audio.stat().st_size > 0
+        and cache_subtitles.is_file()
+        and cache_subtitles.stat().st_size > 0
+    ):
+        shutil.copy2(cache_audio, output_audio)
+        shutil.copy2(cache_subtitles, output_subtitles)
+        return SpeechResult(
+            audio_path=output_audio,
+            subtitles_path=output_subtitles,
         )
-    except TTSError:
-        raise
-    except Exception as error:
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, 4):
+        try:
+            asyncio.run(
+                _synthesize_with_subtitles_async(
+                    text=clean_text,
+                    output_audio=output_audio,
+                    output_subtitles=output_subtitles,
+                    voice=voice,
+                    rate=rate,
+                    volume=volume,
+                )
+            )
+            last_error = None
+            break
+        except Exception as error:
+            last_error = error
+
+            for partial in (
+                output_audio,
+                output_subtitles,
+            ):
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+            if attempt < 3:
+                time.sleep(
+                    0.6 * attempt
+                    + random.uniform(0.05, 0.25)
+                )
+
+    if last_error is not None:
         raise TTSError(
-            f"Не удалось создать озвучку и субтитры: {error}"
-        ) from error
+            "Не удалось создать озвучку после 3 попыток. "
+            f"Голос: {voice}. Причина: {last_error}"
+        ) from last_error
 
     if (
         not output_audio.is_file()
@@ -260,6 +330,13 @@ def synthesize_speech_with_subtitles(
         raise TTSError(
             "Файл субтитров не был создан или оказался пустым."
         )
+
+    try:
+        shutil.copy2(output_audio, cache_audio)
+        shutil.copy2(output_subtitles, cache_subtitles)
+    except OSError:
+        # Кэш — оптимизация, а не обязательная часть рендера.
+        pass
 
     return SpeechResult(
         audio_path=output_audio,

@@ -252,15 +252,133 @@ def _escape_ass_text(text: str) -> str:
     )
 
 
+
+def _ass_alpha_from_opacity(opacity_percent: int) -> int:
+    """
+    ASS использует обратную прозрачность:
+    00 = непрозрачно, FF = прозрачно.
+    """
+
+    opacity_percent = max(0, min(100, opacity_percent))
+    return round(255 * (100 - opacity_percent) / 100)
+
+
+def _resolve_subtitle_position(
+    position: str,
+) -> tuple[int, int]:
+    """Возвращает ASS Alignment и MarginV."""
+
+    normalized = position.strip().lower()
+
+    if normalized in {"центр", "center"}:
+        return 5, 0
+
+    if normalized in {
+        "ниже",
+        "ниже центра",
+        "lower",
+        "below",
+    }:
+        return 2, 520
+
+    if normalized in {
+        "вниз",
+        "внизу",
+        "низ",
+        "bottom",
+    }:
+        return 2, 250
+
+    return 2, 520
+
+
+def _hex_to_ass_color(
+    value: str,
+    *,
+    alpha: int = 0,
+) -> str:
+    """#RRGGBB -> ASS &HAABBGGRR."""
+
+    clean = value.strip().lstrip("#")
+
+    if len(clean) != 6:
+        clean = "FFFFFF"
+
+    try:
+        red = int(clean[0:2], 16)
+        green = int(clean[2:4], 16)
+        blue = int(clean[4:6], 16)
+    except ValueError:
+        red, green, blue = 255, 255, 255
+
+    alpha = max(0, min(255, alpha))
+    return (
+        f"&H{alpha:02X}"
+        f"{blue:02X}{green:02X}{red:02X}"
+    )
+
+
+def _resolve_subtitle_style(
+    style_name: str,
+    background_opacity: int,
+    text_color: str,
+    outline_color: str,
+) -> dict[str, str | int]:
+    """Параметры ASS-стиля для финального рендера."""
+
+    normalized = style_name.strip().lower()
+    alpha = _ass_alpha_from_opacity(
+        background_opacity
+    )
+    back_colour = f"&H{alpha:02X}000000"
+
+    if normalized == "bold":
+        return {
+            "primary": _hex_to_ass_color(text_color),
+            "secondary": _hex_to_ass_color(text_color),
+            "outline_colour": _hex_to_ass_color(outline_color),
+            "back_colour": back_colour,
+            "border_style": 1,
+            "outline": 6,
+            "shadow": 2,
+        }
+
+    if normalized == "classic":
+        return {
+            "primary": _hex_to_ass_color(text_color),
+            "secondary": _hex_to_ass_color(text_color),
+            "outline_colour": _hex_to_ass_color(outline_color),
+            "back_colour": back_colour,
+            "border_style": 1,
+            "outline": 4,
+            "shadow": 1,
+        }
+
+    return {
+        "primary": _hex_to_ass_color(text_color),
+        "secondary": _hex_to_ass_color(text_color),
+        "outline_colour": _hex_to_ass_color(outline_color),
+        "back_colour": back_colour,
+        "border_style": 1,
+        "outline": 5,
+        "shadow": 3,
+    }
+
+
 def generate_ass_subtitles(
     srt_path: Path,
     output_ass: Path,
     font_name: str = "Arial",
     font_size: int = 72,
-    margin_vertical: int = 520,
+    margin_vertical: int | None = None,
     min_words: int = 2,
     max_words: int = 4,
     max_duration: float = 2.2,
+    style_name: str = "Glow",
+    position: str = "Ниже",
+    background_opacity: int = 72,
+    text_color: str = "#FFFFFF",
+    outline_color: str = "#E66BFF",
 ) -> Path:
     """Создаёт оформленные ASS-субтитры из SRT."""
 
@@ -269,10 +387,32 @@ def generate_ass_subtitles(
             "Размер шрифта должен быть больше нуля."
         )
 
-    if margin_vertical < 0:
+    if (
+        margin_vertical is not None
+        and margin_vertical < 0
+    ):
         raise ValueError(
             "Отступ субтитров не может быть отрицательным."
         )
+
+    if not 0 <= background_opacity <= 100:
+        raise ValueError(
+            "Прозрачность фона должна быть от 0 до 100."
+        )
+
+    alignment, resolved_margin = (
+        _resolve_subtitle_position(position)
+    )
+
+    if margin_vertical is None:
+        margin_vertical = resolved_margin
+
+    style = _resolve_subtitle_style(
+        style_name,
+        background_opacity,
+        text_color,
+        outline_color,
+    )
 
     raw_cues = parse_srt(srt_path)
 
@@ -298,7 +438,7 @@ WrapStyle: 0
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,{font_name},{font_size},&H00FFFFFF,&H0000FFFF,&H00000000,&H64000000,-1,0,0,0,100,100,0,0,1,4,1,2,55,55,{margin_vertical},1
+Style: Default,{font_name},{font_size},{style["primary"]},{style["secondary"]},{style["outline_colour"]},{style["back_colour"]},-1,0,0,0,100,100,0,0,{style["border_style"]},{style["outline"]},{style["shadow"]},{alignment},55,55,{margin_vertical},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

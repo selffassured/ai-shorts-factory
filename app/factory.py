@@ -3,19 +3,14 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-from app.services.gameplay.clipper import prepare_gameplay_segment
+from app.services.gameplay.clipper import choose_random_start
 from app.services.gameplay.library import GameplayLibrary
 from app.services.subtitles.ass_generator import generate_ass_subtitles
 from app.services.tts.edge_provider import (
     DEFAULT_VOICE,
     synthesize_speech_with_subtitles,
 )
-from app.services.video.renderer import (
-    render_video_with_audio,
-    render_video_with_audio_and_ass_subtitles,
-    render_video_with_voice_and_music,
-    render_video_with_voice_music_and_ass_subtitles,
-)
+from app.services.video.renderer import render_short_video
 from app.services.video.video_info import get_media_duration
 
 
@@ -63,6 +58,13 @@ class AIShortsFactory:
         music_volume: float = 0.12,
         fps: int = 30,
         subtitles: bool = True,
+        subtitle_style: str = "Glow",
+        subtitle_font_size: int = 72,
+        subtitle_position: str = "Ниже",
+        subtitle_background_opacity: int = 72,
+        subtitle_font_name: str = "Arial",
+        subtitle_text_color: str = "#FFFFFF",
+        subtitle_outline_color: str = "#E66BFF",
     ) -> Path:
         """Создаёт готовый вертикальный ролик."""
 
@@ -96,9 +98,6 @@ class AIShortsFactory:
             voice_path = temporary_path / "voice.mp3"
             srt_path = temporary_path / "subtitles.srt"
             ass_path = temporary_path / "subtitles.ass"
-            gameplay_segment_path = (
-                temporary_path / "gameplay_segment.mp4"
-            )
 
            
             speech = synthesize_speech_with_subtitles(
@@ -114,63 +113,56 @@ class AIShortsFactory:
                 speech.audio_path
             )
 
-            
-            prepared_gameplay = prepare_gameplay_segment(
-                input_video=gameplay_path,
-                output_video=gameplay_segment_path,
+            if voice_duration <= 0.05:
+                raise RuntimeError(
+                    "Озвучка создана, но её длительность "
+                    "оказалась нулевой."
+                )
+
+            gameplay_duration = get_media_duration(
+                gameplay_path
+            )
+
+            if gameplay_duration <= 0.05:
+                raise RuntimeError(
+                    "Выбранный gameplay имеет нулевую "
+                    "длительность или повреждён."
+                )
+            gameplay_start = choose_random_start(
+                video_duration=gameplay_duration,
                 required_duration=voice_duration,
             )
+
+            generated_ass: Path | None = None
 
             
             if subtitles:
                 generated_ass = generate_ass_subtitles(
                     srt_path=speech.subtitles_path,
                     output_ass=ass_path,
-                    font_size=72,
-                    margin_vertical=520,
+                    font_size=subtitle_font_size,
+                    margin_vertical=None,
                     min_words=2,
                     max_words=4,
                     max_duration=2.2,
+                    style_name=subtitle_style,
+                    position=subtitle_position,
+                    background_opacity=(
+                        subtitle_background_opacity
+                    ),
+                    font_name=subtitle_font_name,
+                    text_color=subtitle_text_color,
+                    outline_color=subtitle_outline_color,
                 )
 
-                # Голос + музыка + субтитры.
-                if music is not None:
-                    return (
-                        render_video_with_voice_music_and_ass_subtitles(
-                            input_video=prepared_gameplay,
-                            voice_audio=speech.audio_path,
-                            background_music=music,
-                            subtitles_ass=generated_ass,
-                            output_video=output_video,
-                            fps=fps,
-                            music_volume=music_volume,
-                        )
-                    )
-
-                # Голос + субтитры, без музыки.
-                return render_video_with_audio_and_ass_subtitles(
-                    input_video=prepared_gameplay,
-                    input_audio=speech.audio_path,
-                    subtitles_ass=generated_ass,
-                    output_video=output_video,
-                    fps=fps,
-                )
-
-            # 5. Режим без субтитров, но с музыкой.
-            if music is not None:
-                return render_video_with_voice_and_music(
-                    input_video=prepared_gameplay,
-                    voice_audio=speech.audio_path,
-                    background_music=music,
-                    output_video=output_video,
-                    fps=fps,
-                    music_volume=music_volume,
-                )
-
-            # 6. Только голос и геймплей.
-            return render_video_with_audio(
-                input_video=prepared_gameplay,
-                input_audio=speech.audio_path,
+            return render_short_video(
+                input_video=gameplay_path,
+                voice_audio=speech.audio_path,
+                background_music=music,
+                subtitles_ass=generated_ass,
                 output_video=output_video,
+                duration=voice_duration,
+                start_seconds=gameplay_start,
                 fps=fps,
+                music_volume=music_volume,
             )
