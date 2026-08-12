@@ -6,11 +6,17 @@ import random
 import shutil
 import time
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import edge_tts
+
+from app.core.cancellation import (
+    GenerationCancelledError,
+    check_cancelled,
+)
 
 DEFAULT_VOICE = "ru-RU-SvetlanaNeural"
 TICKS_PER_SECOND = 10_000_000
@@ -120,7 +126,10 @@ async def _synthesize_with_subtitles_async(
     voice: str,
     rate: str,
     volume: str,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> None:
+    check_cancelled(cancel_callback)
+
     communicator = edge_tts.Communicate(
         text=text,
         voice=voice,
@@ -133,6 +142,8 @@ async def _synthesize_with_subtitles_async(
 
     with output_audio.open("wb") as audio_file:
         async for message in communicator.stream():
+            check_cancelled(cancel_callback)
+
             message_type = message["type"]
 
             if message_type == "audio":
@@ -140,6 +151,8 @@ async def _synthesize_with_subtitles_async(
 
             elif message_type == "WordBoundary":
                 word_events.append(message)
+
+    check_cancelled(cancel_callback)
 
     if not word_events:
         raise TTSError(
@@ -222,10 +235,13 @@ def synthesize_speech_with_subtitles(
     voice: str = DEFAULT_VOICE,
     rate: str = "+0%",
     volume: str = "+0%",
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> SpeechResult:
     """Создаёт MP3 и SRT с точными таймингами слов."""
 
     clean_text = text.strip()
+
+    check_cancelled(cancel_callback)
 
     if not clean_text:
         raise ValueError(
@@ -270,6 +286,9 @@ def synthesize_speech_with_subtitles(
     ):
         shutil.copy2(cache_audio, output_audio)
         shutil.copy2(cache_subtitles, output_subtitles)
+
+        check_cancelled(cancel_callback)
+
         return SpeechResult(
             audio_path=output_audio,
             subtitles_path=output_subtitles,
@@ -287,10 +306,21 @@ def synthesize_speech_with_subtitles(
                     voice=voice,
                     rate=rate,
                     volume=volume,
+                    cancel_callback=cancel_callback,
                 )
             )
             last_error = None
             break
+        except GenerationCancelledError:
+            for partial in (
+                output_audio,
+                output_subtitles,
+            ):
+                try:
+                    partial.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            raise
         except Exception as error:
             last_error = error
 
@@ -304,10 +334,15 @@ def synthesize_speech_with_subtitles(
                     pass
 
             if attempt < 3:
-                time.sleep(
+                delay = (
                     0.6 * attempt
                     + random.uniform(0.05, 0.25)
                 )
+                deadline = time.monotonic() + delay
+
+                while time.monotonic() < deadline:
+                    check_cancelled(cancel_callback)
+                    time.sleep(0.05)
 
     if last_error is not None:
         raise TTSError(
@@ -331,6 +366,8 @@ def synthesize_speech_with_subtitles(
             "Файл субтитров не был создан или оказался пустым."
         )
 
+    check_cancelled(cancel_callback)
+
     try:
         shutil.copy2(output_audio, cache_audio)
         shutil.copy2(output_subtitles, cache_subtitles)
@@ -350,6 +387,7 @@ def synthesize_speech(
     voice: str = DEFAULT_VOICE,
     rate: str = "+0%",
     volume: str = "+0%",
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> Path:
     """Создаёт только MP3-файл озвучки."""
 
@@ -362,6 +400,7 @@ def synthesize_speech(
         voice=voice,
         rate=rate,
         volume=volume,
+        cancel_callback=cancel_callback,
     )
 
     temporary_subtitles.unlink(missing_ok=True)

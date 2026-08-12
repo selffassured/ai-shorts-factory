@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import re
 
 from PySide6.QtCore import (
     QEasingCurve,
     QPropertyAnimation,
+    QTimer,
     Qt,
     QUrl,
 )
@@ -21,6 +23,7 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QInputDialog,
     QListWidget,
+    QListWidgetItem,
     QComboBox,
     QColorDialog,
     QFileDialog,
@@ -35,6 +38,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QStackedWidget,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -51,13 +55,16 @@ from app.gui.worker import (
     VoicePreviewWorker,
 )
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QVideoSink
+from PySide6.QtMultimediaWidgets import QVideoWidget
 
 from app.services.history.storage import RenderHistoryStorage
 from app.services.projects.storage import ProjectStorage
+from app.services.preflight import validate_generation
 from app.services.queue.storage import RenderQueueStorage
 from app.services.settings.storage import AppSettingsStorage
 from app.services.templates.presets import TEMPLATE_PRESETS
 from app.services.gameplay.library import GameplayLibrary
+from app.services.video.video_info import get_media_duration, MediaInfoError
 from app.services.tts.edge_provider import DEFAULT_VOICE
 
 VOICE_OPTIONS = {
@@ -66,6 +73,13 @@ VOICE_OPTIONS = {
     "Emma (US Multi)": "en-US-EmmaMultilingualNeural",
     "Andrew (US Multi)": "en-US-AndrewMultilingualNeural",
 }
+
+EXPORT_PRESETS = {
+    "Full HD · 30 FPS": (1080, 1920, 30),
+    "HD · 30 FPS": (720, 1280, 30),
+    "Full HD · 60 FPS": (1080, 1920, 60),
+}
+
 
 
 class MainWindow(QMainWindow):
@@ -87,6 +101,8 @@ class MainWindow(QMainWindow):
         self.render_queue = self.queue_storage.load()
         self._queue_running = False
         self._queue_current_story = ""
+        self._queue_failures = 0
+        self._cancel_requested = False
 
         self.worker: VideoGenerationWorker | None = None
         self.voice_preview_worker: VoicePreviewWorker | None = None
@@ -137,74 +153,208 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
         root_layout = QHBoxLayout(root)
-        root_layout.setContentsMargins(
-            18,
-            16,
-            18,
-            18,
-        )
+        root_layout.setContentsMargins(18, 16, 18, 18)
         root_layout.setSpacing(18)
+        root_layout.addWidget(self._build_sidebar())
 
-        root_layout.addWidget(
-            self._build_sidebar()
-        )
+        self.page_stack = QStackedWidget()
+        self.page_stack.setObjectName("pageStack")
 
+        self.home_page = self._build_home_page()
+        self.projects_page = self._build_projects_page()
+        self.templates_page = self._build_templates_page()
+        self.history_page = self._build_history_page()
+        self.queue_page = self._build_queue_page()
+
+        for page in (
+            self.home_page,
+            self.projects_page,
+            self.templates_page,
+            self.history_page,
+            self.queue_page,
+        ):
+            self.page_stack.addWidget(page)
+
+        root_layout.addWidget(self.page_stack, stretch=1)
+
+    def _build_home_page(self) -> QWidget:
         content = QWidget()
         content.setObjectName("contentRoot")
-
         content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(
-            6,
-            2,
-            6,
-            4,
-        )
+        content_layout.setContentsMargins(6, 2, 6, 4)
         content_layout.setSpacing(18)
-
-        content_layout.addLayout(
-            self._build_header()
-        )
+        content_layout.addLayout(self._build_header())
 
         body = QHBoxLayout()
         body.setSpacing(18)
 
         center_column = QVBoxLayout()
         center_column.setSpacing(18)
-        center_column.addWidget(
-            self._build_story_card(),
-            stretch=27,
-        )
-        center_column.addWidget(
-            self._build_settings_card(),
-            stretch=33,
-        )
-        center_column.addWidget(
-            self._build_output_card(),
-            stretch=15,
-        )
-        center_column.addWidget(
-            self._build_generate_card(),
-            stretch=16,
-        )
+        center_column.addWidget(self._build_story_card(), stretch=27)
+        center_column.addWidget(self._build_settings_card(), stretch=33)
+        center_column.addWidget(self._build_output_card(), stretch=15)
+        center_column.addWidget(self._build_generate_card(), stretch=16)
 
-        body.addLayout(
-            center_column,
-            stretch=8,
-        )
-        body.addWidget(
-            self._build_preview_column(),
-            stretch=3,
-        )
+        body.addLayout(center_column, stretch=8)
+        body.addWidget(self._build_preview_column(), stretch=3)
+        content_layout.addLayout(body, stretch=1)
+        return content
 
-        content_layout.addLayout(
-            body,
-            stretch=1,
-        )
+    def _make_section_page(
+        self,
+        title_text: str,
+        subtitle_text: str,
+    ) -> tuple[QWidget, QVBoxLayout]:
+        page = QWidget()
+        page.setObjectName("contentRoot")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(18, 12, 18, 18)
+        layout.setSpacing(18)
 
-        root_layout.addWidget(
-            content,
-            stretch=1,
+        title = QLabel(title_text)
+        title.setObjectName("pageTitle")
+        layout.addWidget(title)
+
+        subtitle = QLabel(subtitle_text)
+        subtitle.setObjectName("mutedText")
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+        return page, layout
+
+    def _build_projects_page(self) -> QWidget:
+        page, layout = self._make_section_page(
+            "▣  Проекты",
+            "Сохраняй настройки Shorts и возвращайся к ним позже.",
         )
+        card = self._make_card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(14)
+
+        self.projects_page_list = QListWidget()
+        self.projects_page_list.setObjectName("libraryList")
+        card_layout.addWidget(self.projects_page_list, 1)
+
+        row = QHBoxLayout()
+        save_button = QPushButton("Сохранить текущий")
+        open_button = QPushButton("Открыть")
+        delete_button = QPushButton("Удалить")
+        row.addWidget(save_button)
+        row.addWidget(open_button)
+        row.addWidget(delete_button)
+        row.addStretch()
+        card_layout.addLayout(row)
+
+        save_button.clicked.connect(self._page_save_project)
+        open_button.clicked.connect(self._page_open_project)
+        delete_button.clicked.connect(self._page_delete_project)
+        self.projects_page_list.itemDoubleClicked.connect(
+            lambda _item: self._page_open_project()
+        )
+        layout.addWidget(card, 1)
+        return page
+
+    def _build_templates_page(self) -> QWidget:
+        page, layout = self._make_section_page(
+            "▤  Шаблоны",
+            "Готовые пресеты оформления для текущего Short.",
+        )
+        card = self._make_card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(14)
+
+        self.templates_page_list = QListWidget()
+        self.templates_page_list.setObjectName("libraryList")
+        for name, preset in TEMPLATE_PRESETS.items():
+            self.templates_page_list.addItem(
+                f"{name}\n{preset['description']}"
+            )
+        card_layout.addWidget(self.templates_page_list, 1)
+
+        row = QHBoxLayout()
+        apply_button = QPushButton("Применить к Short")
+        row.addWidget(apply_button)
+        row.addStretch()
+        card_layout.addLayout(row)
+
+        apply_button.clicked.connect(self._page_apply_template)
+        self.templates_page_list.itemDoubleClicked.connect(
+            lambda _item: self._page_apply_template()
+        )
+        layout.addWidget(card, 1)
+        return page
+
+    def _build_history_page(self) -> QWidget:
+        page, layout = self._make_section_page(
+            "◷  История",
+            "Все успешно созданные Shorts в одном месте.",
+        )
+        card = self._make_card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(14)
+
+        self.history_page_list = QListWidget()
+        self.history_page_list.setObjectName("libraryList")
+        card_layout.addWidget(self.history_page_list, 1)
+
+        row = QHBoxLayout()
+        open_button = QPushButton("Открыть файл")
+        folder_button = QPushButton("Открыть папку")
+        clear_button = QPushButton("Очистить историю")
+        row.addWidget(open_button)
+        row.addWidget(folder_button)
+        row.addWidget(clear_button)
+        row.addStretch()
+        card_layout.addLayout(row)
+
+        open_button.clicked.connect(self._page_open_history_file)
+        folder_button.clicked.connect(self._page_open_history_folder)
+        clear_button.clicked.connect(self._page_clear_history)
+        self.history_page_list.itemDoubleClicked.connect(
+            lambda _item: self._page_open_history_file()
+        )
+        layout.addWidget(card, 1)
+        return page
+
+    def _build_queue_page(self) -> QWidget:
+        page, layout = self._make_section_page(
+            "⇅  Очередь",
+            "Подготовь несколько Shorts и отрендери их последовательно.",
+        )
+        card = self._make_card()
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(22, 20, 22, 20)
+        card_layout.setSpacing(14)
+
+        self.queue_summary_label = QLabel("0 заданий")
+        self.queue_summary_label.setObjectName("mutedText")
+        card_layout.addWidget(self.queue_summary_label)
+
+        self.queue_page_list = QListWidget()
+        self.queue_page_list.setObjectName("libraryList")
+        card_layout.addWidget(self.queue_page_list, 1)
+
+        row = QHBoxLayout()
+        add_button = QPushButton("Добавить текущий")
+        remove_button = QPushButton("Удалить")
+        clear_button = QPushButton("Очистить")
+        start_button = QPushButton("Запустить очередь")
+        start_button.setObjectName("accentButton")
+        row.addWidget(add_button)
+        row.addWidget(remove_button)
+        row.addWidget(clear_button)
+        row.addStretch()
+        row.addWidget(start_button)
+        card_layout.addLayout(row)
+
+        add_button.clicked.connect(self._page_add_queue_item)
+        remove_button.clicked.connect(self._page_remove_queue_item)
+        clear_button.clicked.connect(self._page_clear_queue)
+        start_button.clicked.connect(self._page_start_queue)
+        layout.addWidget(card, 1)
+        return page
 
     def _build_sidebar(self) -> QFrame:
         panel = QFrame()
@@ -234,6 +384,8 @@ class MainWindow(QMainWindow):
             "⇅  Очередь",
         )
 
+        self.nav_buttons = []
+
         for index, text in enumerate(navigation):
             button = QPushButton(text)
             button.setObjectName(
@@ -241,9 +393,9 @@ class MainWindow(QMainWindow):
                 if index == 0
                 else "navButton"
             )
-            button.setCursor(
-                Qt.CursorShape.PointingHandCursor
-            )
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.setProperty("pageIndex", index)
+            self.nav_buttons.append(button)
             layout.addWidget(button)
 
         layout.addStretch()
@@ -320,15 +472,16 @@ class MainWindow(QMainWindow):
 
     def _build_story_card(self) -> HoverFrame:
         card = self._make_card()
+        card.setMinimumHeight(225)
 
         layout = QVBoxLayout(card)
         layout.setContentsMargins(
             22,
-            20,
+            18,
             22,
-            20,
+            16,
         )
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         top = QHBoxLayout()
 
@@ -354,18 +507,29 @@ class MainWindow(QMainWindow):
             "Вчера вечером со мной "
             "произошла очень странная история..."
         )
-        self.story_input.setFixedHeight(104)
+        self.story_input.setFixedHeight(96)
         self.story_input.textChanged.connect(
             self._update_character_count
         )
 
         actions = QHBoxLayout()
+        actions.setContentsMargins(
+            0,
+            6,
+            0,
+            0,
+        )
+        actions.setSpacing(10)
 
         clear_button = QPushButton(
             "⌫  Очистить"
         )
         clear_button.setObjectName(
-            "secondaryButton"
+            "storyActionButton"
+        )
+        clear_button.setFixedSize(
+            118,
+            32,
         )
         clear_button.clicked.connect(
             self.story_input.clear
@@ -375,7 +539,11 @@ class MainWindow(QMainWindow):
             "✦  Вставить пример"
         )
         example_button.setObjectName(
-            "secondaryButton"
+            "storyActionButton"
+        )
+        example_button.setFixedSize(
+            168,
+            32,
         )
         example_button.clicked.connect(
             self._insert_example
@@ -752,6 +920,29 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
         layout.addLayout(row)
 
+        export_row = QHBoxLayout()
+        export_row.setSpacing(10)
+
+        export_label = QLabel("Экспорт")
+        export_label.setObjectName("mutedText")
+
+        self.export_preset_combo = QComboBox()
+
+        for preset_name, preset_data in EXPORT_PRESETS.items():
+            self.export_preset_combo.addItem(
+                preset_name,
+                preset_data,
+            )
+
+        self.export_preset_combo.setCurrentIndex(0)
+
+        export_row.addWidget(export_label)
+        export_row.addWidget(
+            self.export_preset_combo,
+            1,
+        )
+        layout.addLayout(export_row)
+
         return card
 
     def _build_generate_card(self) -> HoverFrame:
@@ -782,6 +973,8 @@ class MainWindow(QMainWindow):
         )
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFormat("%p%")
+        self.progress_bar.setFixedHeight(10)
 
         self.generate_button = GlowButton(
             "✦  СОЗДАТЬ SHORT"
@@ -790,11 +983,35 @@ class MainWindow(QMainWindow):
             self._start_generation
         )
 
+        self.cancel_button = QPushButton(
+            "ОТМЕНИТЬ"
+        )
+        self.cancel_button.setObjectName(
+            "cancelRenderButton"
+        )
+        self.cancel_button.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+        self.cancel_button.setFixedWidth(112)
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.clicked.connect(
+            self._cancel_generation
+        )
+
+        render_buttons = QHBoxLayout()
+        render_buttons.setSpacing(9)
+        render_buttons.addWidget(
+            self.generate_button,
+            1,
+        )
+        render_buttons.addWidget(
+            self.cancel_button
+        )
+
         layout.addWidget(self.status_label)
         layout.addWidget(self.progress_bar)
-        layout.addWidget(
-            self.generate_button
-        )
+        layout.addLayout(render_buttons)
 
         return card
 
@@ -1253,6 +1470,32 @@ class MainWindow(QMainWindow):
                 color: white;
             }
 
+            QListWidget#libraryList {
+                background: rgba(7, 12, 35, 175);
+                border: 1px solid rgba(112, 93, 220, 95);
+                border-radius: 16px;
+                padding: 8px;
+                color: #f4f5ff;
+                font-size: 14px;
+                outline: none;
+            }
+
+            QListWidget#libraryList::item {
+                min-height: 68px;
+                padding: 10px 12px;
+                margin: 3px;
+                border-radius: 10px;
+            }
+
+            QListWidget#libraryList::item:hover {
+                background: rgba(93, 74, 180, 75);
+            }
+
+            QListWidget#libraryList::item:selected {
+                background: rgba(111, 76, 220, 125);
+                border: 1px solid rgba(221, 107, 255, 120);
+            }
+
             QPushButton#navButton,
             QPushButton#navButtonActive {
                 border: 1px solid transparent;
@@ -1515,6 +1758,40 @@ class MainWindow(QMainWindow):
             QPushButton#voicePreviewButton:disabled {
                 color: rgba(255, 255, 255, 150);
                 background: rgba(49, 46, 129, 80);
+            }
+
+            QPushButton#cancelRenderButton {
+                color: #ffd7df;
+                background: rgba(126, 34, 61, 105);
+                border: 1px solid rgba(251, 113, 133, 115);
+                border-radius: 12px;
+                padding: 8px 10px;
+                font-size: 12px;
+                font-weight: 800;
+            }
+
+            QPushButton#cancelRenderButton:hover {
+                background: rgba(159, 18, 57, 150);
+                border-color: rgba(253, 164, 175, 180);
+            }
+
+            QPushButton#storyActionButton {
+                color: #d8dcf2;
+                background: rgba(63, 53, 116, 90);
+                border: 1px solid rgba(126, 106, 255, 70);
+                border-radius: 9px;
+                padding: 3px 10px;
+                font-size: 13px;
+                font-weight: 650;
+            }
+
+            QPushButton#storyActionButton:hover {
+                background: rgba(124, 58, 237, 80);
+                border-color: rgba(216, 180, 254, 130);
+            }
+
+            QPushButton#storyActionButton:pressed {
+                background: rgba(79, 70, 229, 110);
             }
 
             QPushButton#secondaryButton,
@@ -2235,20 +2512,258 @@ class MainWindow(QMainWindow):
             )
 
     def _connect_sidebar_actions(self) -> None:
-        """Оживляет кнопки навигации слева."""
+        """Переключает страницы внутри главного окна."""
+        for button in self.nav_buttons:
+            page_index = int(button.property("pageIndex"))
+            button.clicked.connect(
+                lambda _checked=False, index=page_index:
+                self._switch_page(index)
+            )
+        self._switch_page(0)
 
-        for button in self.findChildren(QPushButton):
-            label = button.text()
+    def _switch_page(self, index: int) -> None:
+        if not 0 <= index < self.page_stack.count():
+            return
 
-            if "Проект" in label:
-                button.clicked.connect(self._open_projects_dialog)
-            elif "Шаблон" in label:
-                button.clicked.connect(self._open_templates_dialog)
-            elif "Истор" in label:
-                button.clicked.connect(self._open_history_dialog)
-            elif "Очеред" in label:
-                button.clicked.connect(self._open_queue_dialog)
+        self.page_stack.setCurrentIndex(index)
 
+        for button_index, button in enumerate(self.nav_buttons):
+            button.setObjectName(
+                "navButtonActive"
+                if button_index == index
+                else "navButton"
+            )
+            button.style().unpolish(button)
+            button.style().polish(button)
+
+        if index == 1:
+            self._refresh_projects_page()
+        elif index == 3:
+            self._refresh_history_page()
+        elif index == 4:
+            self._refresh_queue_page()
+
+    def _refresh_projects_page(self) -> None:
+        self.projects_page_list.clear()
+
+        for name in self.project_storage.list_projects():
+            try:
+                info = self.project_storage.describe(name)
+            except (OSError, ValueError, json.JSONDecodeError):
+                self.projects_page_list.addItem(name)
+                continue
+
+            item = QListWidgetItem(
+                f"{info['name']}\n"
+                f"Изменён: {info['modified_at']}   •   "
+                f"Gameplay: {info['gameplay']}   •   "
+                f"Голос: {info['voice']}\n"
+                f"{info['story_preview'] or 'Без текста'}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.projects_page_list.addItem(item)
+
+    def _page_save_project(self) -> None:
+        self._save_project()
+        self._refresh_projects_page()
+
+    def _page_open_project(self) -> None:
+        item = self.projects_page_list.currentItem()
+        if item is None:
+            return
+        project_name = (
+            item.data(Qt.ItemDataRole.UserRole)
+            or item.text().splitlines()[0]
+        )
+
+        try:
+            data = self.project_storage.load(project_name)
+            self._apply_project_data(data)
+            self.current_project_name = project_name
+        except (OSError, ValueError) as error:
+            QMessageBox.warning(
+                self, "Не удалось открыть", str(error)
+            )
+            return
+        self._switch_page(0)
+        self.status_label.setText(
+            f"●  Проект «{project_name}» открыт"
+        )
+
+    def _page_delete_project(self) -> None:
+        item = self.projects_page_list.currentItem()
+        if item is None:
+            return
+        project_name = (
+            item.data(Qt.ItemDataRole.UserRole)
+            or item.text().splitlines()[0]
+        )
+
+        answer = QMessageBox.question(
+            self,
+            "Удалить проект?",
+            f"Удалить «{project_name}»?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.project_storage.delete(project_name)
+        if self.current_project_name == project_name:
+            self.current_project_name = None
+        self._refresh_projects_page()
+
+    def _page_apply_template(self) -> None:
+        index = self.templates_page_list.currentRow()
+        if index < 0:
+            return
+        name = list(TEMPLATE_PRESETS.keys())[index]
+        self._apply_template(name)
+        self._switch_page(0)
+
+    def _refresh_history_page(self) -> None:
+        self.history_page_list.clear()
+
+        for entry in self.history_storage.load():
+            created = str(entry.get("created_at", "")).replace("T", " ")
+            path = Path(str(entry.get("output_path", "")))
+            preview = entry.get("story_preview", "")
+            duration = entry.get("duration_seconds")
+            size_bytes = int(entry.get("size_bytes", 0) or 0)
+            preset = entry.get("export_preset", "")
+
+            duration_text = (
+                f"{float(duration):.1f} сек"
+                if isinstance(duration, (int, float))
+                else "длительность —"
+            )
+            size_text = (
+                f"{size_bytes / 1024 / 1024:.1f} MB"
+                if size_bytes > 0
+                else "размер —"
+            )
+
+            self.history_page_list.addItem(
+                f"{path.name}   •   {created}\n"
+                f"{duration_text}   •   {size_text}"
+                + (f"   •   {preset}" if preset else "")
+                + f"\n{preview}"
+            )
+
+    def _selected_history_entry(self) -> dict | None:
+        index = self.history_page_list.currentRow()
+        data = self.history_storage.load()
+        if 0 <= index < len(data):
+            return data[index]
+        return None
+
+    def _page_open_history_file(self) -> None:
+        entry = self._selected_history_entry()
+        if not entry:
+            return
+        path = Path(str(entry.get("output_path", ""))).resolve()
+        if path.is_file():
+            QDesktopServices.openUrl(
+                QUrl.fromLocalFile(str(path))
+            )
+
+    def _page_open_history_folder(self) -> None:
+        entry = self._selected_history_entry()
+        if not entry:
+            return
+        path = Path(str(entry.get("output_path", ""))).resolve()
+        QDesktopServices.openUrl(
+            QUrl.fromLocalFile(str(path.parent))
+        )
+
+    def _page_clear_history(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Очистить историю?",
+            "Видео останутся на диске. "
+            "Удалится только список истории.",
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self.history_storage.clear()
+            self._refresh_history_page()
+
+    def _refresh_queue_page(self) -> None:
+        self.queue_page_list.clear()
+
+        total = len(self.render_queue)
+        done = sum(
+            1 for item in self.render_queue
+            if item.get("_status") == "Готово"
+        )
+        self.queue_summary_label.setText(
+            f"{total} заданий   •   готово {done}/{total}"
+        )
+
+        for number, entry in enumerate(self.render_queue, start=1):
+            preview = " ".join(
+                str(entry.get("story_text", "")).split()
+            )[:90]
+            status = str(entry.get("_status", "Ожидает"))
+            progress = int(entry.get("_progress", 0) or 0)
+            self.queue_page_list.addItem(
+                f"{number}. [{status}] {progress}%\n"
+                f"{preview or 'Без текста'}"
+            )
+
+    def _page_add_queue_item(self) -> None:
+        data = self._collect_project_data()
+        if not str(data.get("story_text", "")).strip():
+            QMessageBox.warning(
+                self,
+                "Нет текста",
+                "Сначала добавь текст истории на Главной.",
+            )
+            return
+        data["output_path"] = str(self.output_path)
+        data["_status"] = "Ожидает"
+        data["_progress"] = 0
+        self.render_queue.append(data)
+        self.queue_storage.save(self.render_queue)
+        self._refresh_queue_page()
+
+    def _page_remove_queue_item(self) -> None:
+        index = self.queue_page_list.currentRow()
+        if 0 <= index < len(self.render_queue):
+            self.render_queue.pop(index)
+            self.queue_storage.save(self.render_queue)
+            self._refresh_queue_page()
+
+    def _page_clear_queue(self) -> None:
+        if not self.render_queue:
+            return
+        answer = QMessageBox.question(
+            self,
+            "Очистить очередь?",
+            "Удалить все задания из очереди?",
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        self.render_queue.clear()
+        self.queue_storage.save([])
+        self._refresh_queue_page()
+
+    def _page_start_queue(self) -> None:
+        if self.worker is not None:
+            QMessageBox.warning(
+                self,
+                "Рендер уже идёт",
+                "Дождись текущего рендера или отмени его.",
+            )
+            return
+        if not self.render_queue:
+            QMessageBox.information(
+                self,
+                "Очередь пуста",
+                "Добавь хотя бы один Short.",
+            )
+            return
+        self._queue_running = True
+        self._queue_failures = 0
+        self._switch_page(0)
+        self._start_next_queue_item()
 
     def _apply_saved_app_settings(self) -> None:
         voice = self.app_settings.get("default_voice")
@@ -2594,6 +3109,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(dialog, "Очередь пуста", "Добавь хотя бы один Short.")
                 return
             self._queue_running = True
+            self._queue_failures = 0
             dialog.accept()
             self._start_next_queue_item()
 
@@ -2607,14 +3123,33 @@ class MainWindow(QMainWindow):
         if not self.render_queue:
             self._queue_running = False
             self.queue_storage.save([])
+
+            if self._queue_failures:
+                message = (
+                    "Очередь завершена.\n\n"
+                    f"Не удалось создать: "
+                    f"{self._queue_failures}."
+                )
+            else:
+                message = (
+                    "Все Shorts из очереди "
+                    "отрендерены."
+                )
+
             QMessageBox.information(
                 self,
                 "Очередь готова",
-                "Все Shorts из очереди отрендерены.",
+                message,
             )
             return
 
         data = self.render_queue[0]
+        data["_status"] = "Подготовка"
+        data["_progress"] = 1
+        self.queue_storage.save(self.render_queue)
+        if hasattr(self, "queue_page_list"):
+            self._refresh_queue_page()
+
         self._apply_project_data(data)
 
         output_dir = Path(
@@ -2622,7 +3157,9 @@ class MainWindow(QMainWindow):
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        index = len(self.history_storage.load()) + 1
+        index = 1
+        while (output_dir / f"short_{index:03d}.mp4").exists():
+            index += 1
         self.output_path = output_dir / f"short_{index:03d}.mp4"
         self.output_label.setText(str(self.output_path))
         self._queue_current_story = str(data.get("story_text", ""))
@@ -2650,6 +3187,7 @@ class MainWindow(QMainWindow):
             "subtitle_font": self.preview_font.currentText(),
             "subtitle_text_color": self.preview_text_color,
             "subtitle_outline_color": self.preview_outline_color,
+            "export_preset": self.export_preset_combo.currentText(),
         }
 
     def _apply_project_data(self, data: dict) -> None:
@@ -2759,6 +3297,21 @@ class MainWindow(QMainWindow):
             )
         )
         self._update_subtitle_color_buttons()
+
+        export_preset = str(
+            data.get(
+                "export_preset",
+                "Full HD · 30 FPS",
+            )
+        )
+        index = self.export_preset_combo.findText(
+            export_preset
+        )
+        if index >= 0:
+            self.export_preset_combo.setCurrentIndex(
+                index
+            )
+
         self._update_preview_appearance()
 
     def _save_project(self) -> None:
@@ -3200,12 +3753,54 @@ class MainWindow(QMainWindow):
                 str(self.output_path)
             )
 
+        export_data = (
+            self.export_preset_combo.currentData()
+        )
+
+        if not (
+            isinstance(export_data, tuple)
+            and len(export_data) == 3
+        ):
+            export_data = (
+                1080,
+                1920,
+                30,
+            )
+
+        output_width, output_height, export_fps = (
+            export_data
+        )
+
+        gameplay_value = (
+            self.gameplay_combo.currentData()
+            or self.gameplay_combo.currentText()
+        )
+
+        preflight_problems = validate_generation(
+            story=story,
+            gameplay=gameplay_value,
+            output_video=self.output_path,
+            voice=self.voice_combo.currentData(),
+            music=music,
+            width=output_width,
+            height=output_height,
+            fps=export_fps,
+        )
+
+        if preflight_problems:
+            QMessageBox.warning(
+                self,
+                "Проверь настройки",
+                "Перед генерацией нужно исправить:\n\n• "
+                + "\n• ".join(preflight_problems),
+            )
+            return
+
+        self._cancel_requested = False
+
         self.worker = VideoGenerationWorker(
             story=story,
-            gameplay=(
-                self.gameplay_combo.currentData()
-                or self.gameplay_combo.currentText()
-            ),
+            gameplay=gameplay_value,
             output_video=self.output_path,
             voice=self.voice_combo.currentData(),
             voice_rate=(
@@ -3243,6 +3838,9 @@ class MainWindow(QMainWindow):
             subtitle_outline_color=(
                 self.preview_outline_color
             ),
+            output_width=output_width,
+            output_height=output_height,
+            fps=export_fps,
             parent=self,
         )
 
@@ -3252,6 +3850,12 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(
             self._generation_failed
         )
+        self.worker.cancelled.connect(
+            self._generation_cancelled
+        )
+        self.worker.progress.connect(
+            self._generation_progress
+        )
         self.worker.finished.connect(
             self._worker_finished
         )
@@ -3260,12 +3864,88 @@ class MainWindow(QMainWindow):
         self.generate_button.setText(
             "✦  СОЗДАЁМ SHORT…"
         )
-        self.status_label.setText(
-            "●  Генерация озвучки и рендер…"
+
+        self.cancel_button.setText(
+            "ОТМЕНИТЬ"
         )
-        self.progress_bar.setRange(0, 0)
+        self.cancel_button.setCursor(
+            Qt.CursorShape.PointingHandCursor
+        )
+        self.cancel_button.setEnabled(True)
+        self.cancel_button.setVisible(True)
+        self.cancel_button.raise_()
+
+        self.status_label.setText(
+            "●  2%  Запускаем конвейер…"
+        )
+        self.progress_bar.setRange(
+            0,
+            100,
+        )
+        self.progress_bar.setValue(2)
 
         self.worker.start()
+
+    def _cancel_generation(self) -> None:
+        if self.worker is None:
+            return
+
+        self._cancel_requested = True
+        self._queue_running = False
+        self._queue_current_story = ""
+
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setText(
+            "ОТМЕНЯЕМ…"
+        )
+        self.cancel_button.setCursor(
+            Qt.CursorShape.ArrowCursor
+        )
+        self.status_label.setText(
+            "●  Отменяем генерацию…"
+        )
+
+        self.worker.cancel()
+
+        # Событие отмены устанавливается сразу. Worker завершит
+        # текущий TTS/FFmpeg этап безопасно и пришлёт cancelled.
+        self.progress_bar.setRange(0, 100)
+
+    def _generation_cancelled(self) -> None:
+        self.status_label.setText(
+            "●  Генерация отменена"
+        )
+        self.progress_bar.setRange(
+            0,
+            100,
+        )
+        self.progress_bar.setValue(0)
+
+    def _generation_progress(
+        self,
+        value: int,
+        message: str,
+    ) -> None:
+        self.progress_bar.setRange(
+            0,
+            100,
+        )
+        self.progress_bar.setValue(
+            max(
+                0,
+                min(100, value),
+            )
+        )
+        self.status_label.setText(
+            f"●  {value}%  {message}"
+        )
+
+        if self._queue_running and self.render_queue:
+            self.render_queue[0]["_status"] = message
+            self.render_queue[0]["_progress"] = value
+            self.queue_storage.save(self.render_queue)
+            if hasattr(self, "queue_page_list"):
+                self._refresh_queue_page()
 
     def _generation_completed(
         self,
@@ -3285,38 +3965,199 @@ class MainWindow(QMainWindow):
             if self._queue_running
             else self.story_input.toPlainText().strip()
         )
+        duration_seconds = None
+        try:
+            duration_seconds = get_media_duration(Path(output_path))
+        except (OSError, FileNotFoundError, MediaInfoError, ValueError):
+            pass
+
         self.history_storage.add(
             output_path,
             completed_story,
+            duration_seconds=duration_seconds,
+            export_preset=self.export_preset_combo.currentText(),
+            gameplay=self.gameplay_combo.currentText(),
+            voice=self.voice_combo.currentText(),
         )
+
+        if hasattr(self, "history_page_list"):
+            self._refresh_history_page()
 
         if self._queue_running:
             if self.render_queue:
+                self.render_queue[0]["_status"] = "Готово"
+                self.render_queue[0]["_progress"] = 100
+                self.queue_storage.save(self.render_queue)
                 self.render_queue.pop(0)
                 self.queue_storage.save(self.render_queue)
+                if hasattr(self, "queue_page_list"):
+                    self._refresh_queue_page()
             self._queue_current_story = ""
             self.status_label.setText(
                 "●  Элемент очереди готов"
             )
             return
 
-        answer = QMessageBox.question(
-            self,
-            "Видео готово",
-            f"Файл создан:\n{output_path}\n\n"
-            "Открыть папку?",
+        self._show_render_result(
+            Path(output_path)
         )
 
-        if answer == QMessageBox.StandardButton.Yes:
-            QDesktopServices.openUrl(
+    def _show_render_result(
+        self,
+        output_path: Path,
+    ) -> None:
+        """Показывает готовый Short прямо в приложении."""
+
+        output_path = output_path.resolve()
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Short готов")
+        dialog.setMinimumSize(620, 560)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(
+            18,
+            18,
+            18,
+            18,
+        )
+        layout.setSpacing(12)
+
+        title = QLabel("✓ Short успешно создан")
+        title.setObjectName("cardTitle")
+        layout.addWidget(title)
+
+        content = QHBoxLayout()
+        content.setSpacing(18)
+
+        result_video = QVideoWidget(dialog)
+        result_video.setFixedSize(
+            225,
+            400,
+        )
+
+        result_audio = QAudioOutput(dialog)
+        result_audio.setVolume(0.65)
+
+        result_player = QMediaPlayer(dialog)
+        result_player.setAudioOutput(
+            result_audio
+        )
+        result_player.setVideoOutput(
+            result_video
+        )
+        result_player.setSource(
+            QUrl.fromLocalFile(
+                str(output_path)
+            )
+        )
+
+        def loop_result(
+            status: QMediaPlayer.MediaStatus,
+        ) -> None:
+            if (
+                status
+                == QMediaPlayer.MediaStatus.EndOfMedia
+            ):
+                result_player.setPosition(0)
+                result_player.play()
+
+        result_player.mediaStatusChanged.connect(
+            loop_result
+        )
+
+        info = QVBoxLayout()
+        info.setSpacing(10)
+
+        filename_label = QLabel(
+            output_path.name
+        )
+        filename_label.setObjectName(
+            "settingTitle"
+        )
+        filename_label.setWordWrap(True)
+
+        size_mb = (
+            output_path.stat().st_size
+            / 1024
+            / 1024
+        )
+
+        preset = (
+            self.export_preset_combo.currentText()
+        )
+
+        details = QLabel(
+            f"Экспорт: {preset}\\n"
+            f"Размер файла: {size_mb:.1f} MB\\n"
+            f"Папка: {output_path.parent}"
+        )
+        details.setObjectName("mutedText")
+        details.setWordWrap(True)
+
+        info.addWidget(filename_label)
+        info.addWidget(details)
+        info.addStretch()
+
+        content.addWidget(result_video)
+        content.addLayout(info, 1)
+        layout.addLayout(content, 1)
+
+        buttons = QHBoxLayout()
+
+        play_button = QPushButton(
+            "▶ / ■"
+        )
+        open_file_button = QPushButton(
+            "Открыть видео"
+        )
+        folder_button = QPushButton(
+            "Открыть папку"
+        )
+        close_button = QPushButton(
+            "Готово"
+        )
+
+        buttons.addWidget(play_button)
+        buttons.addWidget(open_file_button)
+        buttons.addWidget(folder_button)
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        def toggle_playback() -> None:
+            if (
+                result_player.playbackState()
+                == QMediaPlayer.PlaybackState.PlayingState
+            ):
+                result_player.pause()
+            else:
+                result_player.play()
+
+        play_button.clicked.connect(
+            toggle_playback
+        )
+        open_file_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(
-                    str(
-                        Path(output_path)
-                        .parent
-                        .resolve()
-                    )
+                    str(output_path)
                 )
             )
+        )
+        folder_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(
+                QUrl.fromLocalFile(
+                    str(output_path.parent)
+                )
+            )
+        )
+        close_button.clicked.connect(
+            dialog.accept
+        )
+
+        result_player.play()
+        dialog.exec()
+        result_player.stop()
 
     def _generation_failed(
         self,
@@ -3331,14 +4172,30 @@ class MainWindow(QMainWindow):
         )
         self.progress_bar.setValue(0)
 
+        if self._queue_running:
+            self._queue_failures += 1
+
+            if self.render_queue:
+                self.render_queue[0]["_status"] = "Ошибка"
+                self.render_queue[0]["_progress"] = 0
+                self.queue_storage.save(self.render_queue)
+                self.render_queue.pop(0)
+                self.queue_storage.save(
+                    self.render_queue
+                )
+
+            self._queue_current_story = ""
+            self.status_label.setText(
+                "●  Ошибка элемента — "
+                "переходим к следующему"
+            )
+            return
+
         QMessageBox.critical(
             self,
             "Ошибка",
             error_message,
         )
-        if self._queue_running:
-            self._queue_running = False
-            self._queue_current_story = ""
 
     def _worker_finished(self) -> None:
         self.generate_button.set_busy(False)
@@ -3346,11 +4203,26 @@ class MainWindow(QMainWindow):
             "✦  СОЗДАТЬ SHORT"
         )
 
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.setVisible(False)
+        self.cancel_button.setText(
+            "ОТМЕНИТЬ"
+        )
+        self.cancel_button.setCursor(
+            Qt.CursorShape.ArrowCursor
+        )
+
         if self.worker is not None:
             self.worker.deleteLater()
             self.worker = None
 
-        if self._queue_running:
+        was_cancelled = self._cancel_requested
+        self._cancel_requested = False
+
+        if (
+            self._queue_running
+            and not was_cancelled
+        ):
             QTimer.singleShot(
                 250,
                 self._start_next_queue_item,

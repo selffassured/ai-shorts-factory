@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 
@@ -44,6 +45,22 @@ class ProjectStorage:
         if not path.is_file():
             raise FileNotFoundError(f"Проект не найден: {name}")
         return json.loads(path.read_text(encoding="utf-8"))
+
+    def describe(self, name: str) -> dict:
+        path = self.path_for(name)
+        data = self.load(name)
+        modified = datetime.fromtimestamp(
+            path.stat().st_mtime
+        ).isoformat(timespec="minutes")
+        return {
+            "name": name,
+            "modified_at": modified,
+            "gameplay": data.get("gameplay", "—"),
+            "voice": data.get("voice", "—"),
+            "story_preview": " ".join(
+                str(data.get("story_text", "")).split()
+            )[:100],
+        }
 
     def delete(self, name: str) -> None:
         path = self.path_for(name)

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -14,14 +15,35 @@ SUPPORTED_EXTENSIONS = {
 }
 
 
+def _default_gameplay_root() -> Path:
+    """
+    Возвращает путь к gameplay и в обычном Python-запуске,
+    и в PyInstaller-сборке.
+
+    В source-режиме: <project>/assets/gameplay
+    В EXE:         <exe_dir>/assets/gameplay
+    """
+
+    if getattr(sys, "frozen", False):
+        base_dir = Path(sys.executable).resolve().parent
+    else:
+        base_dir = Path(__file__).resolve().parents[3]
+
+    return base_dir / "assets" / "gameplay"
+
+
 class GameplayLibrary:
     """Локальная библиотека игровых роликов."""
 
     def __init__(
         self,
-        root: Path = Path("assets/gameplay"),
+        root: Path | None = None,
     ) -> None:
-        self.root = root.resolve()
+        self.root = (
+            Path(root)
+            if root is not None
+            else _default_gameplay_root()
+        ).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
     def _category_folder(self, category: str) -> Path:

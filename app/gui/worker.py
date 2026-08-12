@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import tempfile
 from pathlib import Path
+import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from app.core.cancellation import GenerationCancelledError
 from app.core.user_errors import format_user_error
 from app.factory import AIShortsFactory
 from app.services.tts.edge_provider import synthesize_speech
@@ -16,6 +18,8 @@ class VideoGenerationWorker(QThread):
 
     completed = Signal(str)
     failed = Signal(str)
+    cancelled = Signal()
+    progress = Signal(int, str)
 
     def __init__(
         self,
@@ -35,6 +39,9 @@ class VideoGenerationWorker(QThread):
         subtitle_font_name: str = "Arial",
         subtitle_text_color: str = "#FFFFFF",
         subtitle_outline_color: str = "#E66BFF",
+        output_width: int = 1080,
+        output_height: int = 1920,
+        fps: int = 30,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -56,12 +63,25 @@ class VideoGenerationWorker(QThread):
         self.subtitle_font_name = subtitle_font_name
         self.subtitle_text_color = subtitle_text_color
         self.subtitle_outline_color = subtitle_outline_color
+        self.output_width = output_width
+        self.output_height = output_height
+        self.fps = fps
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Запрашивает безопасную остановку генерации."""
+        self._cancel_event.set()
 
     def run(self) -> None:
         """Запускает полный конвейер генерации."""
 
         try:
             factory = AIShortsFactory()
+
+            self.progress.emit(
+                5,
+                "Проверяем файлы и настройки…",
+            )
 
             result = factory.create_video(
                 story=self.story,
@@ -81,8 +101,22 @@ class VideoGenerationWorker(QThread):
                 subtitle_font_name=self.subtitle_font_name,
                 subtitle_text_color=self.subtitle_text_color,
                 subtitle_outline_color=self.subtitle_outline_color,
+                output_width=self.output_width,
+                output_height=self.output_height,
+                fps=self.fps,
+                progress_callback=(
+                    lambda value, message:
+                    self.progress.emit(
+                        value,
+                        message,
+                    )
+                ),
+                cancel_callback=self._cancel_event.is_set,
             )
 
+        except GenerationCancelledError:
+            self.cancelled.emit()
+            return
         except Exception as error:
             self.failed.emit(
                 format_user_error(error)
@@ -99,6 +133,10 @@ class VideoGenerationWorker(QThread):
             )
             return
 
+        self.progress.emit(
+            100,
+            "Готово",
+        )
         self.completed.emit(str(result))
 
 

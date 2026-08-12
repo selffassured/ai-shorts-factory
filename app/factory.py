@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
+
+from app.core.cancellation import check_cancelled
 
 from app.services.gameplay.clipper import choose_random_start
 from app.services.gameplay.library import GameplayLibrary
@@ -57,6 +60,8 @@ class AIShortsFactory:
         voice_rate: str = "+0%",
         music_volume: float = 0.12,
         fps: int = 30,
+        output_width: int = 1080,
+        output_height: int = 1920,
         subtitles: bool = True,
         subtitle_style: str = "Glow",
         subtitle_font_size: int = 72,
@@ -65,8 +70,27 @@ class AIShortsFactory:
         subtitle_font_name: str = "Arial",
         subtitle_text_color: str = "#FFFFFF",
         subtitle_outline_color: str = "#E66BFF",
+        progress_callback: Callable[[int, str], None] | None = None,
+        cancel_callback: Callable[[], bool] | None = None,
     ) -> Path:
         """Создаёт готовый вертикальный ролик."""
+
+        def report(
+            value: int,
+            message: str,
+        ) -> None:
+            if progress_callback is not None:
+                progress_callback(
+                    value,
+                    message,
+                )
+
+        check_cancelled(cancel_callback)
+
+        report(
+            8,
+            "Проверяем gameplay и музыку…",
+        )
 
         clean_story = story.strip()
 
@@ -100,15 +124,26 @@ class AIShortsFactory:
             ass_path = temporary_path / "subtitles.ass"
 
            
+            report(
+                18,
+                "Создаём озвучку…",
+            )
+
             speech = synthesize_speech_with_subtitles(
                 text=clean_story,
                 output_audio=voice_path,
                 output_subtitles=srt_path,
                 voice=voice,
                 rate=voice_rate,
+                cancel_callback=cancel_callback,
             )
 
             
+            report(
+                38,
+                "Проверяем длительность аудио…",
+            )
+
             voice_duration = get_media_duration(
                 speech.audio_path
             )
@@ -155,7 +190,18 @@ class AIShortsFactory:
                     outline_color=subtitle_outline_color,
                 )
 
-            return render_short_video(
+            check_cancelled(cancel_callback)
+
+            report(
+                72,
+                "Подготавливаем финальный рендер…",
+            )
+            report(
+                80,
+                "Собираем MP4 через FFmpeg…",
+            )
+
+            result = render_short_video(
                 input_video=gameplay_path,
                 voice_audio=speech.audio_path,
                 background_music=music,
@@ -163,6 +209,16 @@ class AIShortsFactory:
                 output_video=output_video,
                 duration=voice_duration,
                 start_seconds=gameplay_start,
+                width=output_width,
+                height=output_height,
                 fps=fps,
                 music_volume=music_volume,
+                cancel_callback=cancel_callback,
             )
+
+            report(
+                98,
+                "Проверяем готовый файл…",
+            )
+
+            return result

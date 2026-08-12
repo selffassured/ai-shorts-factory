@@ -1,0 +1,25 @@
+AI Shorts Factory v1.0.0 — release checklist
+
+1. Copy these files into the project root:
+   - AI_Shorts_Factory.spec
+   - ai_shorts_factory.ico
+   - version_info.txt
+
+2. Build:
+   python -m PyInstaller --noconfirm --clean AI_Shorts_Factory.spec
+
+3. Test:
+   dist\AI Shorts Factory\AI Shorts Factory.exe
+
+4. Verify:
+   - icon appears on EXE/window/taskbar
+   - gameplay categories load
+   - voice preview works
+   - one full Short renders
+   - subtitles render
+   - Cancel works
+   - History / Projects / Queue work
+   - output MP4 is created
+
+5. Release folder:
+   dist\AI Shorts Factory\

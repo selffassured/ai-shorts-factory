@@ -18,15 +18,37 @@ class RenderHistoryStorage:
             return []
         return data if isinstance(data, list) else []
 
-    def add(self, output_path: str, story: str) -> None:
+    def add(
+        self,
+        output_path: str,
+        story: str,
+        *,
+        duration_seconds: float | None = None,
+        export_preset: str = "",
+        gameplay: str = "",
+        voice: str = "",
+    ) -> None:
+        path = Path(output_path)
+        size_bytes = 0
+        try:
+            if path.is_file():
+                size_bytes = path.stat().st_size
+        except OSError:
+            pass
+
         items = self.load()
         items.insert(0, {
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "output_path": output_path,
-            "story_preview": " ".join(story.split())[:100],
+            "story_preview": " ".join(story.split())[:120],
+            "duration_seconds": duration_seconds,
+            "size_bytes": size_bytes,
+            "export_preset": export_preset,
+            "gameplay": gameplay,
+            "voice": voice,
         })
         self.path.write_text(
-            json.dumps(items[:100], ensure_ascii=False, indent=2),
+            json.dumps(items[:200], ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
 

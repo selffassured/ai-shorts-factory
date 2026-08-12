@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import os
+import time
 import shutil
 import subprocess
 from pathlib import Path
 
+from app.core.cancellation import GenerationCancelledError
 from app.core.user_errors import safe_remove
 
 
@@ -604,6 +606,7 @@ def render_short_video(
     fps: int = 30,
     voice_volume: float = 1.0,
     music_volume: float = 0.12,
+    cancel_callback=None,
 ) -> Path:
     """Собирает готовый Short одним процессом FFmpeg."""
 
@@ -783,21 +786,41 @@ def render_short_video(
         ]
     )
 
-    result = subprocess.run(
+    process = subprocess.Popen(
         command,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
         errors="replace",
-        check=False,
     )
 
-    if result.returncode != 0:
+    while process.poll() is None:
+        if cancel_callback is not None and cancel_callback():
+            process.terminate()
+
+            try:
+                process.wait(timeout=2.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+            safe_remove(partial_output)
+
+            raise GenerationCancelledError(
+                "Генерация отменена пользователем."
+            )
+
+        time.sleep(0.10)
+
+    _, stderr = process.communicate()
+
+    if process.returncode != 0:
         safe_remove(partial_output)
         raise VideoRenderError(
             "FFmpeg не смог создать Short одним проходом.\n"
-            f"Код ошибки: {result.returncode}\n"
-            f"Вывод FFmpeg:\n{result.stderr}"
+            f"Код ошибки: {process.returncode}\n"
+            f"Вывод FFmpeg:\n{stderr}"
         )
 
     if (
